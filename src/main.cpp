@@ -4,6 +4,7 @@
 #include <WiFi.h>
 
 #include ".config.hpp"
+#include "esp32-hal-adc-hack.hpp"
 
 bool on = true;
 
@@ -53,9 +54,9 @@ std::string ff3n(float f) {
 std::initializer_list<std::pair<std::string, std::function<std::string(const std::string &suffix)>>> COMMANDS{
     {"*IDN?\n", [](const auto &) { return "igelbox,EPS1,0,0.1\n"; }},
     {"OUTPUT:CVCC? CH1\n", [](const auto &) { return "CV\n"; }}, // TODO
-    {"MEASURE:VOLTAGE? CH1\n", [](const auto &) { return ff3n(fmap(avg_v, 0, 65536, 0.0511026945, 155.3751534)); }},
+    {"MEASURE:VOLTAGE? CH1\n", [](const auto &) { return ff3n(fmap(avg_v, 340, 3829, 0.83, 9.02)); }},
     {"SOURCE1:VOLTAGE?\n", [](const auto &) { return ff3n(set_v); }},
-    {"MEASURE:CURRENT? CH1\n", [](const auto &) { return ff3n(fmap(avg_i, 64, 65536, 0.2526465391, 293.8658984)); }},
+    {"MEASURE:CURRENT? CH1\n", [](const auto &) { return ff3n(fmap(avg_i, 11, 473, 0.0116, 1.99)); }},
     {"SOURCE1:CURRENT?\n", [](const auto &) { return ff3n(set_i); }},
 
     // TODO
@@ -208,15 +209,17 @@ void setup() {
 }
 
 void loop() {
-  adc_continuous_data_t *result = nullptr;
-  if (analogContinuousRead(&result, 1000)) { // TODO: I use patched one to avoid integer division
-    for (int i = 0; i < 2; i++) {
-      if (result[i].pin == PIN_ADC_V)
-        avg_v = result[i].avg_read_raw / 511.f;
-      else
-        avg_i = result[i].avg_read_raw / 511.f;
+  adc_continuous_results_t results;
+  if (analogContinuousReadSumCount(results, 1000)) {
+    for (const auto [pin, avg] : std::initializer_list<std::pair<uint8_t, float &>>{
+             {PIN_ADC_V, avg_v},
+             {PIN_ADC_I, avg_i},
+         }) {
+      const auto &result = results[digitalPinToAnalogChannel(pin)];
+      // Serial.printf("%d\t%d\t%d\t%d\n", pin, digitalPinToAnalogChannel(pin), result.count, result.sum_read_raw);
+      avg = (float)result.sum_read_raw / (float)result.count;
     }
-    Serial.printf("%d, ADC PIN data: u=%f\ti=%f\n", millis(), avg_v, avg_i);
+    Serial.printf("%d: u=%f\ti=%f\n", millis(), avg_v, avg_i);
   } else {
     Serial.println("!analogContinuousRead");
   }
