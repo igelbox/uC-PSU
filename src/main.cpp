@@ -8,13 +8,18 @@
 
 bool on = true;
 
-auto fmap(double x, double in_min, double in_max, double out_min, double out_max) {
-  return (x - in_min) / (in_max - in_min) * (out_max - out_min) + out_min;
+auto pmap(double v, const std::initializer_list<double> &poly) {
+  double x = 1.0, result = 0.0;
+  for (auto it = std::rbegin(poly); it != std::rend(poly); ++it) {
+    result += *it * x;
+    x *= v;
+  }
+  return result;
 }
 
-void set(uint8_t pin, float v, float mn, float mx) {
-  const auto pwm = (int)constrain(fmap(v, mn, mx, 0, 1024), 0, 1024);
-  // Serial.printf("PWM: %d=%d(%f)\n", pin, pwm, v);
+void set(uint8_t pin, float v, const std::initializer_list<double> &poly) {
+  const auto pwm = (int)constrain(pmap(v, poly), 0, 1024);
+  Serial.printf("PWM: %d=%d(%f)\n", pin, pwm, v);
   if (!ledcWrite(pin, pwm)) {
     Serial.printf("!ledcWrite(%d,%d)\n", pin, pwm);
     Serial.flush();
@@ -22,22 +27,22 @@ void set(uint8_t pin, float v, float mn, float mx) {
   }
 }
 
-#define PIN_PWM_V 0
+#define PIN_PWM_V 10
 float set_v = 0;
 
 void setVoltage(float v) {
   set_v = v;
-  set(PIN_PWM_V, on ? v : 0.f, 12.08341336f, 0.8334513536f);
+  set(PIN_PWM_V, on ? v : 0.f, {-3.77264919e-02, 9.84725460e-01, -9.29032821e+01, 8.00313668e+02});
 }
 
-#define PIN_PWM_I 1
+#define PIN_PWM_I 20
 float set_i = 0;
 void setCurrent(float v) {
   set_i = v;
-  set(PIN_PWM_I, v, 0.007613493153f, 3.234381453f);
+  set(PIN_PWM_I, v, {268.5754725, -0.91707882});
 }
 
-#define PIN_ADC_I 2
+#define PIN_ADC_I 4
 float avg_i = 0;
 #define PIN_ADC_V 3
 float avg_v = 0;
@@ -54,9 +59,16 @@ std::string ff3n(float f) {
 std::initializer_list<std::pair<std::string, std::function<std::string(const std::string &suffix)>>> COMMANDS{
     {"*IDN?\n", [](const auto &) { return "igelbox,EPS1,0,0.1\n"; }},
     {"OUTPUT:CVCC? CH1\n", [](const auto &) { return "CV\n"; }}, // TODO
-    {"MEASURE:VOLTAGE? CH1\n", [](const auto &) { return ff3n(fmap(avg_v, 340, 3829, 0.83, 9.02)); }},
+    {"MEASURE:VOLTAGE? CH1\n",
+     [](const auto &) {
+       return ff3n(pmap(avg_v, {1.26900834e-14, -8.12377947e-11, 1.81774135e-07, 4.32187213e-03, -6.37734292e-01}));
+     }},
     {"SOURCE1:VOLTAGE?\n", [](const auto &) { return ff3n(set_v); }},
-    {"MEASURE:CURRENT? CH1\n", [](const auto &) { return ff3n(fmap(avg_i, 11, 473, 0.0116, 1.99)); }},
+    {"MEASURE:CURRENT? CH1\n",
+     [](const auto &) {
+       return ff3n(pmap(avg_i, {1.53524393e-18, -4.16563790e-15, 4.28800185e-12, -2.12585388e-09, 5.39631775e-07,
+                                -7.03940880e-05, 8.52150124e-03, -4.70666463e-02}));
+     }},
     {"SOURCE1:CURRENT?\n", [](const auto &) { return ff3n(set_i); }},
 
     // TODO
