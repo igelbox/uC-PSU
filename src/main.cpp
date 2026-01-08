@@ -4,6 +4,7 @@
 #include <WiFi.h>
 
 #include ".config.hpp"
+#include "assert.hpp"
 #include "esp32-hal-adc-hack.hpp"
 
 bool on = true;
@@ -20,11 +21,7 @@ auto pmap(double v, const std::initializer_list<double> &poly) {
 void set(uint8_t pin, float v, const std::initializer_list<double> &poly) {
   const auto pwm = (int)constrain(pmap(v, poly), 0, 1024);
   Serial.printf("PWM: %d=%d(%f)\n", pin, pwm, v);
-  if (!ledcWrite(pin, pwm)) {
-    Serial.printf("!ledcWrite(%d,%d)\n", pin, pwm);
-    Serial.flush();
-    return;
-  }
+  CHECK_VA(ledcWrite(pin, pwm), "(%d,%d)", pin, pwm);
 }
 
 #define PIN_PWM_V 10
@@ -104,30 +101,15 @@ void setup() {
   Serial.begin(115200);
 
   for (const auto pin : std::initializer_list<int>{PIN_PWM_V, PIN_PWM_I}) {
-    if (!ledcAttach(pin, 39138, 10)) {
-      Serial.printf("!ledcAttach: %d\n", pin);
-      Serial.flush();
-      for (;;)
-        ;
-    }
+    ASSERT_VA(ledcAttach(pin, 39138, 10), "(%d)", pin);
     pin == PIN_PWM_V ? setVoltage(0) : setCurrent(0);
   }
 
   {
     analogContinuousSetAtten(ADC_0db);
     uint8_t pins[2] = {PIN_ADC_V, PIN_ADC_I};
-    if (!analogContinuous(pins, 2, 4092 / 2 / SOC_ADC_DIGI_RESULT_BYTES, 1024, nullptr)) {
-      Serial.printf("!analogContinuous\n");
-      Serial.flush();
-      for (;;)
-        ;
-    }
-    if (!analogContinuousStart()) {
-      Serial.printf("!analogContinuousStart\n");
-      Serial.flush();
-      for (;;)
-        ;
-    }
+    ASSERT(analogContinuous(pins, 2, 4092 / 2 / SOC_ADC_DIGI_RESULT_BYTES, 1024, nullptr));
+    ASSERT(analogContinuousStart());
   }
 
   for (auto s = WiFi.begin(WIFI_SSID, WIFI_PASW); s != WL_CONNECTED; s = WiFi.status()) {
@@ -139,9 +121,7 @@ void setup() {
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
-  if (!MDNS.begin("epsu")) {
-    Serial.println("!Error setting up mDNS responder");
-  }
+  CHECK(MDNS.begin("epsu"));
   Serial.println("mDNS responder started");
 
   server.onClient(
@@ -222,7 +202,7 @@ void setup() {
 
 void loop() {
   adc_continuous_results_t results;
-  if (analogContinuousReadSumCount(results, 1000)) {
+  if (CHECK(analogContinuousReadSumCount(results, 1000))) {
     for (const auto [pin, avg] : std::initializer_list<std::pair<uint8_t, float &>>{
              {PIN_ADC_V, avg_v},
              {PIN_ADC_I, avg_i},
@@ -232,7 +212,5 @@ void loop() {
       avg = (float)result.sum_read_raw / (float)result.count;
     }
     Serial.printf("%d: u=%f\ti=%f\n", millis(), avg_v, avg_i);
-  } else {
-    Serial.println("!analogContinuousRead");
   }
 }
