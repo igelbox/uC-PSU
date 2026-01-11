@@ -11,7 +11,7 @@
 
 Preferences preferences;
 
-bool on = true;
+bool on = true, overcurrent = false;
 
 auto mid_or_0(int16_t a, int16_t b) {
   const auto d = (b - a) / 2, m = a + d;
@@ -95,7 +95,7 @@ struct PinPwm : Pin {
   }
   void setValue(float v) {
     value = v;
-    const auto mv = on ? (int16_t)(v * 1e3f) : 0;
+    const auto mv = on && !overcurrent ? (int16_t)(v * 1e3f) : 0;
     setDuty(interpoly(mv, poly, S2F, reversed ? DESC : ASC, DiscontinuityCheck::USE_LAST_CONTINUOUS));
   }
   void restoreValue() { setValue(value); }
@@ -120,6 +120,25 @@ struct PinAdc : Pin {
   }
 } adc_v(3, pwm_v, "adc-mv"), adc_a(4, pwm_a, "adc-ma");
 
+#define PIN_CC 8
+static bool ocp = true;
+void IRAM_ATTR handleOvercurrent() {
+  if (!ocp || overcurrent)
+    return;
+  overcurrent = true;
+  pwm_v.restoreValue();
+  pwm_a.restoreValue();
+}
+void checkOvercurrent() {
+  if (ocp && digitalRead(PIN_CC))
+    handleOvercurrent();
+  else {
+    overcurrent = false;
+    pwm_v.restoreValue();
+    pwm_a.restoreValue();
+  }
+}
+
 struct : public AsyncServer {
   using AsyncServer::_port;
 } server(5555);
@@ -130,6 +149,7 @@ static float midv, mida;
 void calibrate(PinAdc &adc, const std::string &rest) {
   auto &pwm = adc.pwm;
   if (rest == "RESTART") {
+    ocp = overcurrent = false;
     adc.poly.clear();
     pwm.poly.clear();
   } else {
@@ -148,16 +168,32 @@ std::string ff3n(float f) {
 }
 std::initializer_list<std::pair<std::string, std::function<std::string(const std::string &suffix)>>> COMMANDS{
     {"*IDN?\n", [](const auto &) { return "igelbox,EPS1,0,0.1\n"; }},
-    {"OUTPUT:CVCC? CH1\n", [](const auto &) { return "CV\n"; }}, // TODO
+    {"OUTPUT:CVCC? CH1\n", [](const auto &) { return digitalRead(PIN_CC) ? "CC\n" : "CV\n"; }},
     {"MEASURE:VOLTAGE? CH1\n", [](const auto &) { return ff3n(adc_v.getValue()); }},
     {"SOURCE1:VOLTAGE?\n", [](const auto &) { return ff3n(pwm_v.value); }},
     {"MEASURE:CURRENT? CH1\n", [](const auto &) { return ff3n(adc_a.getValue()); }},
     {"SOURCE1:CURRENT?\n", [](const auto &) { return ff3n(pwm_a.value); }},
 
-    // TODO
-    {"SOURCE1:CURRENT:PROTECTION:STATE?\n", [](const auto &) { return "OFF\n"; }},
-    {"SOURCE1:CURRENT:PROTECTION:TRIPPED?\n", [](const auto &) { return "NO\n"; }},
-    {"SOURCE1:CURRENT:PROTECTION:", [](const auto &) { return ""; }},
+    {"SOURCE1:CURRENT:PROTECTION:STATE?\n", [](const auto &) { return ocp ? "ON\n" : "OFF\n"; }},
+    {"SOURCE1:CURRENT:PROTECTION:STATE ",
+     [](const auto &rest) {
+       ocp = rest == "ON";
+       checkOvercurrent();
+       return "";
+     }},
+    {"SOURCE1:CURRENT:PROTECTION:LEVEL ",
+     [](const auto &rest) {
+       const auto level = std::stof(rest);
+       if (level != pwm_a.value)
+         Serial.printf("OCPL: %f != %f\n", level, pwm_a.value);
+       return "";
+     }},
+    {"SOURCE1:CURRENT:PROTECTION:TRIPPED?\n", [](const auto &) { return overcurrent ? "YES\n" : "NO\n"; }},
+    {"SOURCE1:CURRENT:PROTECTION:CLEAR",
+     [](const auto &) {
+       checkOvercurrent();
+       return "";
+     }},
 
     {"OUTPUT? CH1\n", [](const auto &) { return on ? "ON\n" : "OFF\n"; }},
     {"OUTPUT CH1,",
@@ -195,6 +231,8 @@ std::initializer_list<std::pair<std::string, std::function<std::string(const std
 void setup() {
   pinMode(pwm_v.pin, OUTPUT);
   digitalWrite(pwm_v.pin, HIGH);
+  pinMode(PIN_CC, INPUT_PULLDOWN);
+  attachInterrupt(digitalPinToInterrupt(PIN_CC), handleOvercurrent, RISING);
 
   setCpuFrequencyMhz(80); // reduce heating a bit
   delay(500);             // give a time to connect monitor
