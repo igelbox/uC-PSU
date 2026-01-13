@@ -10,5 +10,6 @@ Via [ngscopeclient](https://www.ngscopeclient.org/manual/PowerSupplyDrivers.html
 **Voltage:** is pretty linear until 1.25 which is XL4015 internal refence voltage value
 ![duty-mv](https://github.com/user-attachments/assets/fc2cdb0e-eb81-4f2e-8c93-992bec833e58)
 
-**Current:** has non-linearity issues in lower adc values (and I yet have no clue why)
-![duty-ma](https://github.com/user-attachments/assets/084e413d-2e9d-436b-a97e-53555233db56)
+**Current:** (output) per pwm is linear all the way
+but ADC has some non-linearity in lower ranges
+![duty-ma](https://github.com/user-attachments/assets/5d13ae0b-77eb-4469-96df-4caf687438f3)

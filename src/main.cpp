@@ -13,11 +13,6 @@ Preferences preferences;
 
 bool on = true, overcurrent = false;
 
-auto mid_or_0(int16_t a, int16_t b) {
-  const auto d = (b - a) / 2, m = a + d;
-  return d && (m != b) ? m : 0;
-}
-
 inline static const std::string POLY_SUFFIX{"-poly"};
 struct Pin {
   const uint8_t pin;
@@ -40,45 +35,6 @@ struct Pin {
     const auto &item = poly.emplace_back(duty, value);
     // Serial.printf("CALIBRATE: %s %d %d=%d\n", key, poly.size(), item.first, item.second);
     std::sort(poly.begin(), poly.end());
-  }
-  uint16_t calibrateNext() {
-    switch (poly.size()) {
-    case 0:
-      return reversed ? 192 : 832;
-    case 1:
-      return 0;
-    case 2:
-      return 1024;
-    }
-    struct {
-      uint16_t v = 0xFFFF;
-      float score = 0;
-      void consider(float e, int16_t a, int16_t b) {
-        const auto m = mid_or_0(a, b);
-        if (!m)
-          return;
-        if (const auto s = e * abs(b - a); s > score) {
-          score = s;
-          v = m;
-        }
-      }
-    } best;
-    bool pf = false;
-    float e;
-    for (size_t i = 2; i < poly.size(); ++i) {
-      const auto &c = poly[i], &p = poly[i - 1], &pp = poly[i - 2];
-      const auto xv = lerpi(p.first, c, pp, F2S), v = p.second;
-      e = abs(1.f - (float)v / xv);
-      if (pf)
-        best.consider(e, p.first, pp.first);
-      pf = max(c.second, p.second) > threshold;
-      if ((i == 2) && (max(p.second, pp.second) > threshold))
-        best.consider(e, p.first, pp.first);
-    }
-    const auto &c = poly.back(), &p = *(poly.rbegin() + 1);
-    if (pf and (max(c.second, p.second) > threshold))
-      best.consider(e, c.first, p.first);
-    return best.v;
   }
 };
 struct PinPwm : Pin {
@@ -143,22 +99,43 @@ struct : public AsyncServer {
   using AsyncServer::_port;
 } server(5555);
 
-static PinAdc *autocalibrate = nullptr;
-static std::vector<float> adcv;
-static float midv, mida;
+struct AutoCalibrator : protected Calibrator<XY> {
+  using Base = Calibrator<XY>;
+  PinAdc &adc;
+  const float midv;
+  const int16_t midd;
+  PolyXY poly;
+  std::vector<float> adcv;
+  float mida;
+
+  AutoCalibrator(PinAdc &adc, float midv, int16_t midd)
+      : Base(&XY::first, &XY::second, adc.pwm.threshold), adc(adc), midv(midv), midd(midd) {}
+
+  std::optional<int16_t> next(int16_t duty, int16_t mv) {
+    const auto &item = poly.emplace_back(duty, mv);
+    std::sort(poly.begin(), poly.end());
+
+    switch (poly.size()) {
+    case 1:
+      return 0;
+    case 2:
+      return 1024;
+    }
+    return Base::next(poly);
+  }
+};
+static std::optional<AutoCalibrator> autocalibrator = std::nullopt;
+
 void calibrate(PinAdc &adc, const std::string &rest) {
   auto &pwm = adc.pwm;
+  pwm.setDuty(pwm.reversed ? 192 : 832);
   if (rest == "RESTART") {
     ocp = overcurrent = false;
     adc.poly.clear();
     pwm.poly.clear();
   } else {
-    midv = std::stof(rest);
-    adcv.clear();
-    autocalibrate = &adc;
+    autocalibrator.emplace(adc, std::stof(rest), pwm.duty);
   }
-  if (const auto nd = pwm.calibrateNext(); nd != 0xFFFF)
-    pwm.setDuty(nd);
 }
 
 std::string ff3n(float f) {
@@ -338,42 +315,43 @@ void setup() {
   Serial.printf("TCP Server started on port %d\n", server._port);
 }
 
-void processAutoCalibration(PinAdc &pin) {
-  adcv.emplace_back(pin.avg);
-  if (adcv.size() == 1) {
+void processAutoCalibration(AutoCalibrator &ac) {
+  auto &adc = ac.adc;
+  ac.adcv.emplace_back(adc.avg);
+  if (ac.adcv.size() == 1) {
     return; // dirty reading
   }
-  if (adcv.size() < (13 - (int)log2f(pin.avg))) {
+  if (ac.adcv.size() < (13 - (int)log2f(adc.avg))) {
     return;
   }
   float avg = 0.f;
-  for (size_t i = 1; i < adcv.size(); ++i) {
-    avg += adcv[i];
+  for (size_t i = 1; i < ac.adcv.size(); ++i) {
+    avg += ac.adcv[i];
   }
-  avg /= adcv.size() - 1;
-  float v = midv;
-  if (pin.poly.empty()) {
-    mida = avg;
+  avg /= ac.adcv.size() - 1;
+  auto &pwm = adc.pwm;
+  float v = ac.midv;
+  if (adc.poly.empty()) {
+    ac.mida = avg;
   } else {
-    v *= avg / mida;
+    v = &adc == &adc_a ? v * pwm.duty / ac.midd : v * avg / ac.mida;
   }
   const auto a8 = (int16_t)(avg * PinAdc::K);
   const auto mv = (int16_t)(v * 1e3f);
-  pin.calibrateSet(a8, mv);
-  auto &pwm = pin.pwm;
+  adc.calibrateSet(a8, mv);
   pwm.calibrateSet(pwm.duty, mv);
   Serial.printf("CA: %d %d %f\n", pwm.duty, a8, v);
-  if (const auto nd = pwm.calibrateNext(); (nd != 0xFFFF) && (pwm.poly.size() < 16)) {
-    pwm.setDuty(nd);
-    adcv.clear();
+  if (const auto nd = ac.next(pwm.duty, &adc == &adc_a ? a8 : mv); nd && (pwm.poly.size() < 16)) {
+    pwm.setDuty(*nd);
+    ac.adcv.clear();
     return;
   }
-  Serial.printf("CALIBRATED: %s %d\n", pin.key, pin.poly.size());
-  pin.calibrateDone();
+  Serial.printf("CALIBRATED: %s %d\n", adc.key, adc.poly.size());
+  adc.calibrateDone();
   pwm.calibrateDone();
   pwm_a.restoreValue();
   pwm_v.restoreValue();
-  autocalibrate = nullptr;
+  autocalibrator = std::nullopt;
 }
 void processAdcResults(const adc_continuous_results_t &results) {
   for (const auto adc : {&adc_v, &adc_a}) {
@@ -382,7 +360,7 @@ void processAdcResults(const adc_continuous_results_t &results) {
     adc->avg = (float)result.sum_read_raw / (float)result.count;
   }
   Serial.printf("%d: u=%f\ti=%f\n", millis(), adc_v.avg, adc_a.avg);
-  if (const auto pin = autocalibrate)
+  if (auto &pin = autocalibrator)
     processAutoCalibration(*pin);
 }
 void loop() {
