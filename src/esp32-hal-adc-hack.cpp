@@ -30,7 +30,7 @@ extern adc_handle_t adc_handle;
 #define ADC_GET_DATA(p_data) ((p_data)->type2.data)
 #endif
 
-bool analogContinuousReadSumCount(adc_continuous_results_t &results, uint32_t timeout_ms) {
+bool analogContinuousReadSamples(adc_continuous_results_t &results, uint32_t timeout_ms) {
   if (!adc_handle.adc_continuous_handle) {
     log_e("ADC Continuous is not initialized!");
     return false;
@@ -46,7 +46,6 @@ bool analogContinuousReadSumCount(adc_continuous_results_t &results, uint32_t ti
     return false;
   }
 
-  memset(results, 0, sizeof(results));
   for (int i = 0; i < bytes_read; i += SOC_ADC_DIGI_RESULT_BYTES) {
     const auto p = (adc_digi_output_data_t *)&adc_read[i];
     const auto chan_num = ADC_GET_CHANNEL(p);
@@ -59,13 +58,11 @@ bool analogContinuousReadSumCount(adc_continuous_results_t &results, uint32_t ti
 
     auto &result = results[chan_num];
     if (data >= (1 << SOC_ADC_DIGI_MAX_BITWIDTH)) {
-      result.invalids_count += 1;
       log_e("Invalid data");
       continue;
     }
 
-    result.sum_read_raw += data;
-    result.count += 1;
+    *result++ = data;
   }
   return true;
 }

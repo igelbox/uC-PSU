@@ -63,10 +63,12 @@ struct PinPwm : Pin {
   void setDutyUnlimited() { setDuty(reversed ? 0 : 1024); }
 } pwm_v(10, "pwm-mv", true, 1 /*1.25 is XL4015 lower reliable bound*/), pwm_a(20, "pwm-ma", false, 0);
 
+static const size_t ADC_BUFFER = 4092 / SOC_ADC_DIGI_RESULT_BYTES, ADC_FREQ = 80000;
 struct PinAdc : Pin {
   static constexpr float K = 8;
   using Base = Pin;
   PinPwm &pwm;
+  uint16_t seqno = 0, buffer[ADC_BUFFER / 2];
   float avg;
   PinAdc(uint8_t pin, PinPwm &pwm, const char *key) : Base(pin, key, 0), pwm(pwm) {}
   float getValue() const {
@@ -75,6 +77,7 @@ struct PinAdc : Pin {
     return mv / 1e3f;
   }
 } adc_v(3, pwm_v, "adc-mv"), adc_a(4, pwm_a, "adc-ma");
+static decltype(millis()) last_adc_time = 0;
 
 #define PIN_CC 8
 static bool ocp = true;
@@ -143,6 +146,15 @@ std::string ff3n(float f) {
   snprintf(buffer, sizeof(buffer), "%.3f\n", f);
   return std::string(buffer);
 }
+std::string fmb(const PinAdc &adc) {
+  std::string result(2 + 2 + 2 + sizeof(adc.buffer), 0);
+  auto ptr = (uint16_t *)result.data();
+  *ptr++ = result.size();
+  *ptr++ = adc.seqno;
+  *ptr++ = (ADC_BUFFER * 1000 / ADC_FREQ) - (millis() - last_adc_time);
+  memcpy(ptr, adc.buffer, sizeof(adc.buffer));
+  return result;
+}
 std::initializer_list<std::pair<std::string, std::function<std::string(const std::string &suffix)>>> COMMANDS{
     {"*IDN?\n", [](const auto &) { return "igelbox,EPS1,0,0.1\n"; }},
     {"OUTPUT:CVCC? CH1\n", [](const auto &) { return digitalRead(PIN_CC) ? "CC\n" : "CV\n"; }},
@@ -203,6 +215,19 @@ std::initializer_list<std::pair<std::string, std::function<std::string(const std
        calibrate(adc_a, rest);
        return "";
      }},
+
+    {"SOURCE1:VOLTAGE:RAW ",
+     [](const auto &rest) {
+       pwm_v.setDuty(std::stoi(rest));
+       return "";
+     }},
+    {"SOURCE1:CURRENT:RAW ",
+     [](const auto &rest) {
+       pwm_a.setDuty(std::stoi(rest));
+       return "";
+     }},
+    {"MEASURE:VOLTAGE:RAW? CH1\n", [](const auto &) { return fmb(adc_v); }},
+    {"MEASURE:CURRENT:RAW? CH1\n", [](const auto &) { return fmb(adc_a); }},
 };
 
 void setup() {
@@ -223,7 +248,7 @@ void setup() {
   {
     analogContinuousSetAtten(ADC_0db);
     uint8_t pins[2] = {adc_v.pin, adc_a.pin};
-    ASSERT(analogContinuous(pins, 2, 4092 / 2 / SOC_ADC_DIGI_RESULT_BYTES, 1024, nullptr));
+    ASSERT(analogContinuous(pins, 2, ADC_BUFFER / 2, ADC_FREQ, nullptr));
     ASSERT(analogContinuousStart());
   }
 
@@ -357,14 +382,25 @@ void processAdcResults(const adc_continuous_results_t &results) {
   for (const auto adc : {&adc_v, &adc_a}) {
     const auto &result = results[digitalPinToAnalogChannel(adc->pin)];
     // Serial.printf("%d\t%d\t%d\t%d\n", pin, digitalPinToAnalogChannel(pin), result.count, result.sum_read_raw);
-    adc->avg = (float)result.sum_read_raw / (float)result.count;
+    uint32_t sum = 0, count = 0;
+    for (auto s = adc->buffer; s < result; ++s) {
+      sum += *s;
+      ++count;
+    }
+    ++adc->seqno;
+    adc->avg = (float)sum / (float)count;
   }
-  Serial.printf("%d: u=%f\ti=%f\n", millis(), adc_v.avg, adc_a.avg);
+  Serial.printf("%d: u=%f\ti=%f", millis(), adc_v.avg, adc_a.avg);
   if (auto &pin = autocalibrator)
     processAutoCalibration(*pin);
 }
 void loop() {
-  adc_continuous_results_t results;
-  if (CHECK(analogContinuousReadSumCount(results, 1000)))
+  adc_continuous_results_t results = {0};
+  for (const auto adc : {&adc_v, &adc_a}) {
+    results[digitalPinToAnalogChannel(adc->pin)] = adc->buffer;
+  }
+  if (CHECK(analogContinuousReadSamples(results, 1100))) {
+    last_adc_time = millis();
     processAdcResults(results);
+  }
 }
